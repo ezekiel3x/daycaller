@@ -1,0 +1,7 @@
+# secrets and local-only files - never upload these
+config.json
+twilio_state.json
+daycaller.log
+audio/
+__pycache__/
+*.tmp

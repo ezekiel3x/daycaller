@@ -1,0 +1,3 @@
+# Optional: natural neural voices on the PC and Swahili phone calls.
+# Everything else uses only the Python standard library.
+edge-tts

@@ -1,0 +1,47 @@
+name: Reminder calls
+
+# Runs in GitHub's cloud, so your phone gets called even when your PC is off.
+#
+# To turn on scheduled calls in YOUR copy:
+#   1. Add the repository secrets TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN,
+#      TWILIO_FROM (your Twilio number) and MY_PHONE (your mobile, +countrycode...).
+#   2. Uncomment the `schedule:` block below and set the cron times.
+#
+# Cron times are UTC. Start each run ~15 minutes BEFORE the reminder time in
+# schedule.json: GitHub sometimes starts scheduled jobs late, so the script waits
+# until the exact reminder time before calling.
+# Example for East Africa Time (UTC+3), reminders at 05:00 Mon/Thu and 07:00 Tue/Wed/Fri:
+on:
+  # schedule:
+  #   - cron: "45 1 * * 1,4"     # Mon & Thu 04:45 EAT -> 05:00 call
+  #   - cron: "45 3 * * 2,3,5"   # Tue, Wed & Fri 06:45 EAT -> 07:00 call
+  workflow_dispatch:
+    inputs:
+      message:
+        description: "Test: call me now with this message (leave empty to run the schedule)"
+        required: false
+        default: "This is a test call from DayCaller."
+
+jobs:
+  call:
+    runs-on: ubuntu-latest
+    timeout-minutes: 130
+    env:
+      TZ: Africa/Dar_es_Salaam   # change to your time zone, e.g. Africa/Lagos, Europe/London
+      TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+      TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+      TWILIO_FROM: ${{ secrets.TWILIO_FROM }}
+      MY_PHONE: ${{ secrets.MY_PHONE }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Test call
+        if: github.event_name == 'workflow_dispatch' && inputs.message != ''
+        env:
+          TEST_MESSAGE: ${{ inputs.message }}
+        run: python daycaller.py cloud --message "$TEST_MESSAGE"
+      - name: Scheduled reminder calls
+        if: github.event_name == 'schedule' || inputs.message == ''
+        run: python daycaller.py cloud --window 90

@@ -1,0 +1,23 @@
+{
+  "next_id": 4,
+  "reminders": [
+    {
+      "id": 1,
+      "time": "06:30",
+      "message": "Your first class today is Data Structures at 8:30 AM in Room 101. Get ready.",
+      "days": ["mon", "wed", "fri"]
+    },
+    {
+      "id": 2,
+      "time": "07:00",
+      "message": "Your first class today is Calculus at 9 AM in Hall B. Get ready.",
+      "days": ["tue", "thu"]
+    },
+    {
+      "id": 3,
+      "time": "21:30",
+      "message": "Time to review today's notes and plan tomorrow.",
+      "days": ["mon", "tue", "wed", "thu", "fri"]
+    }
+  ]
+}
