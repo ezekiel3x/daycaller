@@ -284,9 +284,24 @@ def host_audio(path: str, cfg: dict) -> str:
         f"https://serverless-upload.twilio.com/v1/Services/{s}/Assets/{state['asset_sid']}/Versions",
         body=b"".join(parts), content_type=f"multipart/form-data; boundary={boundary}")
 
-    build = _twilio_request(cfg, "POST", f"{api}/Services/{s}/Builds",
-                            {"AssetVersions": [version["sid"]]})
-    for _ in range(60):  # wait up to ~2 minutes for the build
+    state["asset_version"] = version["sid"]
+    save_json(STATE_FILE, state)
+    _build_and_deploy(cfg, state)
+    return f"https://{state['domain']}{public_path}"
+
+
+def _build_and_deploy(cfg: dict, state: dict) -> None:
+    """Build everything DayCaller hosts (latest audio + the confirm page) and deploy it."""
+    api = "https://serverless.twilio.com/v1"
+    s = state["service_sid"]
+    fields: dict = {}
+    if state.get("asset_version"):
+        fields["AssetVersions"] = [state["asset_version"]]
+    if state.get("confirm_version"):
+        fields["FunctionVersions"] = [state["confirm_version"]]
+        fields["Dependencies"] = json.dumps([{"name": "@twilio/runtime-handler", "version": "2.0.0"}])
+    build = _twilio_request(cfg, "POST", f"{api}/Services/{s}/Builds", fields)
+    for _ in range(90):  # wait up to ~3 minutes for the build
         status = _twilio_request(cfg, "GET", f"{api}/Services/{s}/Builds/{build['sid']}/Status")["status"]
         if status == "completed":
             break
@@ -295,10 +310,104 @@ def host_audio(path: str, cfg: dict) -> str:
         time.sleep(2)
     else:
         raise RuntimeError("Twilio build timed out")
-
     _twilio_request(cfg, "POST", f"{api}/Services/{s}/Environments/{state['environment_sid']}/Deployments",
                     {"BuildSid": build["sid"]})
-    return f"https://{state['domain']}{public_path}"
+
+
+CONFIRM_JS = """exports.handler = function (context, event, callback) {
+  const r = new Twilio.Response();
+  r.appendHeader('Content-Type', 'text/xml');
+  r.setBody('<Response><Say voice="Polly.Matthew-Neural">Thank you. Reminder confirmed. Have a great day.</Say></Response>');
+  callback(null, r);
+};
+"""
+
+
+def ensure_confirm_url(cfg: dict) -> str:
+    """Deploy (once) a tiny page Twilio opens when you press a key during a call.
+    Its visit shows up in the call's events, which is how DayCaller knows YOU answered."""
+    import uuid
+    if os.environ.get("DAYCALLER_CONFIRM_URL"):   # set in GitHub (the cloud has no state file)
+        return os.environ["DAYCALLER_CONFIRM_URL"]
+    api = "https://serverless.twilio.com/v1"
+    state = load_json(STATE_FILE, {})
+    if state.get("account_sid") != cfg["twilio"]["account_sid"]:
+        state = {"account_sid": cfg["twilio"]["account_sid"]}
+    if state.get("confirm_version") and state.get("domain"):
+        return f"https://{state['domain']}/confirm"
+
+    # No local state (e.g. in GitHub Actions): look for what an earlier run already set up.
+    if not state.get("service_sid"):
+        for svc in _twilio_request(cfg, "GET", f"{api}/Services?PageSize=50").get("services", []):
+            if str(svc.get("unique_name", "")).startswith("daycaller-"):
+                state["service_sid"] = svc["sid"]
+                break
+    if state.get("service_sid") and not state.get("environment_sid"):
+        envs = _twilio_request(cfg, "GET", f"{api}/Services/{state['service_sid']}/Environments").get("environments", [])
+        if envs:
+            env = envs[0]
+            state["environment_sid"], state["domain"] = env["sid"], env["domain_name"]
+            if env.get("build_sid"):
+                b = _twilio_request(cfg, "GET", f"{api}/Services/{state['service_sid']}/Builds/{env['build_sid']}")
+                for fv in b.get("function_versions") or []:
+                    if fv.get("path") == "/confirm":
+                        return f"https://{state['domain']}/confirm"   # already deployed
+    if state.get("service_sid") and not state.get("function_sid"):
+        for fn in _twilio_request(cfg, "GET", f"{api}/Services/{state['service_sid']}/Functions").get("functions", []):
+            if fn.get("friendly_name") == "confirm":
+                state["function_sid"] = fn["sid"]
+
+    if not state.get("service_sid"):
+        svc = _twilio_request(cfg, "POST", f"{api}/Services", {
+            "UniqueName": f"daycaller-{uuid.uuid4().hex[:8]}", "FriendlyName": "DayCaller"})
+        state["service_sid"] = svc["sid"]
+    s = state["service_sid"]
+    if not state.get("environment_sid"):
+        env = _twilio_request(cfg, "POST", f"{api}/Services/{s}/Environments", {"UniqueName": "production"})
+        state["environment_sid"], state["domain"] = env["sid"], env["domain_name"]
+    if not state.get("function_sid"):
+        fn = _twilio_request(cfg, "POST", f"{api}/Services/{s}/Functions", {"FriendlyName": "confirm"})
+        state["function_sid"] = fn["sid"]
+    save_json(STATE_FILE, state)
+
+    boundary = uuid.uuid4().hex
+    parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+             for k, v in (("Path", "/confirm"), ("Visibility", "public"))]
+    parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="Content"; filename="confirm.js"\r\n'
+                 f'Content-Type: application/javascript\r\n\r\n{CONFIRM_JS}\r\n'.encode())
+    parts.append(f"--{boundary}--\r\n".encode())
+    version = _twilio_request(
+        cfg, "POST",
+        f"https://serverless-upload.twilio.com/v1/Services/{s}/Functions/{state['function_sid']}/Versions",
+        body=b"".join(parts), content_type=f"multipart/form-data; boundary={boundary}")
+    state["confirm_version"] = version["sid"]
+    _build_and_deploy(cfg, state)
+    save_json(STATE_FILE, state)
+    log("Deployed the confirm page on Twilio")
+    return f"https://{state['domain']}/confirm"
+
+
+def wait_for_call(sid: str, cfg: dict, max_seconds: int = 240) -> str:
+    """Wait until a call ends; return its final status."""
+    base = f"https://api.twilio.com/2010-04-01/Accounts/{cfg['twilio']['account_sid']}"
+    status = "unknown"
+    for _ in range(max_seconds // 5):
+        time.sleep(5)
+        status = _twilio_request(cfg, "GET", f"{base}/Calls/{sid}.json")["status"]
+        if status in ("completed", "no-answer", "busy", "failed", "canceled"):
+            break
+    return status
+
+
+def call_confirmed(sid: str, cfg: dict) -> bool:
+    """True if you pressed a key during the call (Twilio fetched the confirm page)."""
+    base = f"https://api.twilio.com/2010-04-01/Accounts/{cfg['twilio']['account_sid']}"
+    try:
+        events = _twilio_request(cfg, "GET", f"{base}/Calls/{sid}/Events.json?PageSize=50").get("events", [])
+    except Exception as e:  # noqa: BLE001
+        log(f"Could not read call events ({e})")
+        return False
+    return any("/confirm" in str((ev.get("request") or {}).get("url", "")) for ev in events)
 
 
 # --------------------------------------------------------------------------- the "call"
@@ -402,13 +511,14 @@ def ring_pc(message: str, cfg: dict) -> str:
     return result["value"]
 
 
-def phone_call(message: str, cfg: dict) -> bool:
-    """Place a real phone call using Twilio's REST API. Returns True on success."""
+def phone_call(message: str, cfg: dict, confirm_url: str | None = None) -> str | None:
+    """Place a real phone call using Twilio's REST API. Returns the call sid, or None.
+    With `confirm_url`, the call asks you to press a key so DayCaller knows you heard it."""
     t = cfg["twilio"]
     missing = [k for k in ("account_sid", "auth_token", "from_number", "to_number") if not t.get(k)]
     if missing:
         log(f"Phone call skipped - Twilio settings missing: {', '.join(missing)}")
-        return False
+        return None
     twiml = None
     if cfg.get("language", "en") != "en":
         try:
@@ -420,9 +530,13 @@ def phone_call(message: str, cfg: dict) -> bool:
         name = cfg.get("your_name") or ""
         spoken = escape(tr(cfg, "greeting", name=name, message=message))
         v = escape(cfg.get("phone_voice") or "Polly.Matthew-Neural", {'"': "&quot;"})
+        gather = ""
+        if confirm_url:
+            gather = (f'<Gather numDigits="1" timeout="8" action="{escape(confirm_url)}" method="POST">'
+                      f'<Say voice="{v}">Press any key to confirm you heard this reminder.</Say></Gather>')
         twiml = (
             "<Response>"
-            f'<Pause length="1"/><Say voice="{v}">{spoken}</Say><Pause length="1"/>'
+            f'<Pause length="1"/><Say voice="{v}">{spoken}</Say>{gather}<Pause length="1"/>'
             f'<Say voice="{v}">{escape(tr(cfg, "again", message=message))}</Say>'
             "</Response>"
         )
@@ -435,11 +549,35 @@ def phone_call(message: str, cfg: dict) -> bool:
         with urllib.request.urlopen(req, timeout=20) as resp:
             sid = json.loads(resp.read().decode()).get("sid")
             log(f"Phone call placed to {t['to_number']} (call sid {sid})")
-            return True
+            return sid
     except urllib.error.HTTPError as e:
         log(f"Phone call failed: HTTP {e.code} {e.read().decode(errors='ignore')[:300]}")
     except Exception as e:  # noqa: BLE001
         log(f"Phone call failed: {e}")
+    return None
+
+
+def call_until_confirmed(message: str, cfg: dict) -> bool:
+    """Call, and call back (up to missed_max_retries more times) until you press a key."""
+    try:
+        confirm_url = ensure_confirm_url(cfg)
+    except Exception as e:  # noqa: BLE001
+        log(f"Confirm page unavailable ({e}); calling once without confirmation")
+        return phone_call(message, cfg) is not None
+    attempts = 1 + int(cfg.get("missed_max_retries", 2))
+    retry_min = int(cfg.get("missed_retry_minutes", 5))
+    for i in range(1, attempts + 1):
+        sid = phone_call(message, cfg, confirm_url)
+        if sid:
+            status = wait_for_call(sid, cfg)
+            if call_confirmed(sid, cfg):
+                log(f"Attempt {i}: confirmed - you pressed a key.")
+                return True
+            log(f"Attempt {i}: not confirmed (call status: {status}).")
+        if i < attempts:
+            log(f"Calling again in {retry_min} min...")
+            time.sleep(retry_min * 60)
+    log("Gave up: no confirmation after all attempts.")
     return False
 
 
@@ -604,7 +742,7 @@ def cmd_cloud(args) -> None:
     `--window` minutes (waiting until its exact time), so calls work with the PC off."""
     cfg = load_config()
     if args.message:  # manual test from GitHub
-        sys.exit(0 if phone_call(args.message, cfg) else 1)
+        sys.exit(0 if call_until_confirmed(args.message, cfg) else 1)
     now = dt.datetime.now()
     today = now.date()
     due = []
@@ -624,8 +762,29 @@ def cmd_cloud(args) -> None:
         if wait > 0:
             log(f"Waiting {int(wait // 60)} min until {at:%H:%M} for: {message}")
             time.sleep(wait)
-        ok = phone_call(message, cfg) and ok
+        if already_called_since(at - dt.timedelta(minutes=10), cfg):
+            log(f"Already called for {at:%H:%M} (another trigger did it) - skipping.")
+            continue
+        ok = call_until_confirmed(message, cfg) and ok
     sys.exit(0 if ok else 1)
+
+
+def already_called_since(since: dt.datetime, cfg: dict) -> bool:
+    """True if Twilio already placed a call to your phone after `since` (local time).
+    Lets several triggers (cron-job.org + GitHub's own cron) run without double calls."""
+    t = cfg["twilio"]
+    try:
+        since_utc = since.astimezone(dt.timezone.utc)
+        q = urllib.parse.urlencode({"To": t["to_number"], "StartTime>": since_utc.strftime("%Y-%m-%d"),
+                                    "PageSize": 20})
+        url = f"https://api.twilio.com/2010-04-01/Accounts/{t['account_sid']}/Calls.json?{q}"
+        for c in _twilio_request(cfg, "GET", url).get("calls", []):
+            when = c.get("start_time") or c.get("date_created")
+            if when and dt.datetime.strptime(when, "%a, %d %b %Y %H:%M:%S %z") >= since_utc:
+                return True
+    except Exception as e:  # noqa: BLE001
+        log(f"Could not check earlier calls ({e}); calling anyway")
+    return False
 
 
 def cmd_setup(_args) -> None:

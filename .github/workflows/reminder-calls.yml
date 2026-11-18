@@ -2,16 +2,18 @@ name: Reminder calls
 
 # Runs in GitHub's cloud, so your phone gets called even when your PC is off.
 #
-# To turn on scheduled calls in YOUR copy:
-#   1. Add the repository secrets TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN,
-#      TWILIO_FROM (your Twilio number) and MY_PHONE (your mobile, +countrycode...).
-#   2. Uncomment the `schedule:` block below and set the cron times.
+# Main trigger: an external scheduler such as cron-job.org sends a "reminder"
+# repository_dispatch about 5 minutes before each reminder (see the README).
+# GitHub's own cron can start HOURS late, so use it only as an optional backup.
 #
-# Cron times are UTC. Start each run ~15 minutes BEFORE the reminder time in
-# schedule.json: GitHub sometimes starts scheduled jobs late, so the script waits
-# until the exact reminder time before calling.
+# The script waits until the exact time in schedule.json, never calls twice for the
+# same reminder, and calls back until you press a key to confirm.
+#
+# Optional backup: uncomment `schedule:` below and set your times. Cron times are UTC.
 # Example for East Africa Time (UTC+3), reminders at 05:00 Mon/Thu and 07:00 Tue/Wed/Fri:
 on:
+  repository_dispatch:
+    types: [reminder]
   # schedule:
   #   - cron: "45 1 * * 1,4"     # Mon & Thu 04:45 EAT -> 05:00 call
   #   - cron: "45 3 * * 2,3,5"   # Tue, Wed & Fri 06:45 EAT -> 07:00 call
@@ -22,10 +24,14 @@ on:
         required: false
         default: "This is a test call from DayCaller."
 
+concurrency:
+  group: reminder-calls   # a second trigger waits, then sees the call was made and skips
+  cancel-in-progress: false
+
 jobs:
   call:
     runs-on: ubuntu-latest
-    timeout-minutes: 130
+    timeout-minutes: 150
     env:
       TZ: Africa/Dar_es_Salaam   # change to your time zone, e.g. Africa/Lagos, Europe/London
       TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
@@ -43,5 +49,5 @@ jobs:
           TEST_MESSAGE: ${{ inputs.message }}
         run: python daycaller.py cloud --message "$TEST_MESSAGE"
       - name: Scheduled reminder calls
-        if: github.event_name == 'schedule' || inputs.message == ''
+        if: github.event_name != 'workflow_dispatch' || inputs.message == ''
         run: python daycaller.py cloud --window 90

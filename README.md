@@ -13,9 +13,11 @@ I built it because alarms are easy to ignore and a phone call isn't. It runs in 
 ## Features
 
 - 📱 **Real phone calls** through Twilio, to any country Twilio supports.
-- ☁️ **Works with your PC off.** A GitHub Actions cron job places the calls.
+- ☁️ **Works with your PC off.** GitHub Actions places the calls, triggered on time by a free external scheduler.
+- ✅ **Press any key to confirm.** If you don't, DayCaller calls back up to 2 more times, 5 minutes apart. A call that a carrier or voicemail picks up doesn't count as heard.
+- 🛡️ **No double calls**, even if two triggers fire for the same reminder.
 - 💻 **PC "incoming call" popup** with Answer / Snooze / Decline. It rings until you respond and calls back if you miss it.
-- 🗣️ **Natural voices**, male or female. Swahili is supported too 🇹🇿 with neural voices (`sw-TZ-DaudiNeural`, `sw-TZ-RehemaNeural`), even though Twilio itself has no Swahili voice.
+- 🗣️ **Natural voices**, male or female. Swahili is supported too 🇹🇿 with neural voices (`sw-TZ-DaudiNeural`, `sw-TZ-RehemaNeural`), even though Twilio itself has no Swahili voice. Swahili voices work when calls are placed from your PC (`pip install edge-tts`); the GitHub Actions setup is English-first.
 - 🗓️ **Flexible schedule:** daily, weekdays, weekends, specific days, or one-off dates.
 - ✍️ **Plan your day in seconds:** type lines like `7:30am Gym` or `13:00 Lunch with Sam`.
 - 🪶 **Pure Python standard library.** `edge-tts` is optional, only for neural voices.
@@ -56,10 +58,36 @@ On Windows, double-click **Start DayCaller.bat**, or put a shortcut to it in `sh
 2. Edit `schedule.json` with your reminders.
 3. Add the repository secrets (Settings → Secrets and variables → Actions):
    `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM`, `MY_PHONE`.
-4. In `.github/workflows/reminder-calls.yml`, uncomment `schedule:`, set your cron times (in UTC), and set `TZ` to your time zone.
-5. Go to Actions → **Reminder calls** → **Run workflow** to get a test call right away.
+4. In `.github/workflows/reminder-calls.yml`, set `TZ` to your time zone.
+5. Go to Actions → **Reminder calls** → **Run workflow** to get a test call right away. Press any key when it asks.
+6. Set up the on-time trigger below.
 
-Each run starts about 15 minutes early and waits for the exact time, because GitHub sometimes starts scheduled jobs late.
+### On-time trigger (cron-job.org)
+
+GitHub's built-in `schedule:` can start hours late, so a free external scheduler starts the workflow instead.
+
+1. Create a [fine-grained GitHub token](https://github.com/settings/personal-access-tokens/new) with access to only your DayCaller repo and the permission **Contents: Read and write**.
+2. At [cron-job.org](https://console.cron-job.org/signup), create one job for each distinct reminder time, set to run **5 minutes before** it:
+
+   | Setting | Value |
+   |---|---|
+   | URL | `https://api.github.com/repos/YOUR-USERNAME/YOUR-REPO/dispatches` |
+   | Schedule | Your days, 5 minutes before the reminder |
+   | Time zone | Your time zone |
+   | Request method | `POST` |
+   | HTTP authentication | Username: your GitHub username. Password: your token |
+   | Header | `Accept: application/vnd.github+json` |
+   | Request body | `{"event_type":"reminder"}` |
+
+3. Use **Test run** on the job. `204 No Content` means it works. No call is placed unless a reminder is due.
+
+The job only wakes the workflow. The workflow reads `schedule.json` to decide what to say, so one job can cover several days that share a time.
+
+### Press any key to confirm
+
+Twilio reports a call as `completed` whenever anything answers, including a carrier announcement or voicemail. So each call asks you to press a key. The first cloud call deploys a small `/confirm` function to your own Twilio Serverless service, and DayCaller uses it to tell whether you really heard the reminder.
+
+> Each callback is a separate billed call. Check Twilio's rates for your country.
 
 ## Settings (`config.json`)
 
@@ -69,9 +97,10 @@ Each run starts about 15 minutes early and waits for the exact time, because Git
 | `language` | `en` | `en` or `sw` (Swahili) |
 | `voice` | `en-US-GuyNeural` | Neural voice for the PC and Swahili calls |
 | `phone_voice` | `Polly.Matthew-Neural` | Twilio voice for English calls |
-| `your_name` | | Used in the greeting ("Hi Alex…") |
+| `your_name` | | Used in the greeting ("Hi Sam…") |
 | `snooze_minutes` | `10` | Snooze length |
-| `missed_retry_minutes` | `5` | Call back after a missed call |
+| `missed_retry_minutes` | `5` | Minutes before calling back |
+| `missed_max_retries` | `2` | Extra calls if you don't confirm |
 
 ## How it works
 
@@ -79,7 +108,9 @@ Each run starts about 15 minutes early and waits for the exact time, because Git
 schedule.json ──► daycaller.py ──► PC popup + voice (local)
                        │
                        └──► Twilio REST API ──► 📱 your phone
-GitHub Actions cron ──► daycaller.py cloud ──┘   (PC can be off)
+cron-job.org ──► GitHub Actions ──► daycaller.py cloud ──┘   (PC can be off)
+                                         ▲
+                     no key pressed? ────┘ call back in 5 min (up to 3 calls)
 ```
 
 For Swahili, the message is synthesized with a neural voice, uploaded as an asset to your own Twilio Serverless service, and played during the call with `<Play>`.
