@@ -22,14 +22,69 @@ I built it because alarms are easy to ignore and a phone call isn't. It runs in 
 - ✍️ **Plan your day in seconds:** type lines like `7:30am Gym` or `13:00 Lunch with Sam`.
 - 🪶 **Pure Python standard library.** `edge-tts` is optional, only for neural voices.
 
-## Quick start (PC only, free)
+## Choose your setup
+
+| Setup | What you get | PC must stay on? | Cost | You need |
+|---|---|---|---|---|
+| **[A. PC only](#a-pc-only)** | Popup and voice on your computer | Yes | Free | Windows, Python |
+| **[B. PC + phone](#b-pc--phone-calls)** | Setup A plus real phone calls | Yes | Twilio call rates | Setup A, Twilio account |
+| **[C. Cloud](#c-cloud-calls-with-your-pc-off)** (recommended for phone calls) | Real phone calls | **No** | Twilio call rates | Twilio, GitHub and cron-job.org accounts |
+
+## Install
+
+### Requirements
+
+- **Python 3.9 or newer**
+- **Git**
+- **Windows 10 or 11** for the PC popup and voice. Setup C runs in the cloud, so you can manage it from any operating system.
+
+On Windows, install both from a terminal:
+
+```bash
+winget install Python.Python.3.12
+winget install Git.Git
+```
+
+Close the terminal, open a new one, and check that both work:
+
+```bash
+python --version
+git --version
+```
+
+If you install Python from [python.org](https://www.python.org/downloads/) instead, tick **Add python.exe to PATH** in the installer.
+
+### Download DayCaller
 
 ```bash
 git clone https://github.com/ezekiel3x/daycaller.git
 cd daycaller
+```
+
+Optional: install natural voices for the PC. Without them, DayCaller uses the built-in Windows voice.
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+## A. PC only
+
+`schedule.json` comes with example reminders. See them, then remove them:
+
+```bash
+python daycaller.py list
+python daycaller.py remove 1 2 3
+```
+
+Add your day and start the caller:
+
+```bash
 python daycaller.py plan       # type your day: "7:30am Morning workout"
+python daycaller.py test       # ring the PC now
 python daycaller.py run        # keep it running; your PC rings at each time
 ```
+
+The window must stay open and the PC must stay awake.
 
 More commands:
 
@@ -44,25 +99,98 @@ python daycaller.py test "Is this thing on?"
 
 On Windows, double-click **Start DayCaller.bat**, or put a shortcut to it in `shell:startup` so it starts when you log in.
 
-## Real phone calls
+## Twilio account
 
-1. Create a free [Twilio](https://www.twilio.com/try-twilio) account, get a phone number, and on a trial account verify your mobile number.
+Setups B and C both need this.
+
+1. Create an account at [Twilio](https://www.twilio.com/try-twilio).
+2. In the [Twilio Console](https://console.twilio.com), get a phone number.
+3. Copy your **Account SID** and **Auth Token** from the Console home page.
+4. On a trial account, add your mobile under **Phone Numbers → Manage → Verified Caller IDs**. Trial accounts can only call verified numbers.
+5. Calling outside the US? Enable your country under **Voice → Settings → Geo Permissions**.
+
+Write phone numbers in international format, with no spaces: `+15551234567`.
+
+**Trial accounts:** each call starts with a short Twilio notice, and you may have to press a key to hear your reminder. Upgrading removes the notice. Calls are billed per minute, and rates depend on the country, so check [Twilio's voice pricing](https://www.twilio.com/en-us/voice/pricing).
+
+## B. PC + phone calls
+
+1. Finish [Setup A](#a-pc-only) and create your [Twilio account](#twilio-account).
 2. Run `python daycaller.py setup`, choose `phone` or `both`, and enter your Account SID, Auth Token, Twilio number and mobile number. These are saved to `config.json`, which is git-ignored.
 3. Run `python daycaller.py test`. Your phone rings.
 
-> Calling outside the US? Enable your country under Twilio Console → Voice → Settings → **Geo Permissions**.
+## C. Cloud calls with your PC off
 
-## Calls with your PC off (GitHub Actions)
+### 1. Make your own private copy
 
-1. Fork this repo. You can make your copy **private** to keep your schedule to yourself.
-2. Edit `schedule.json` with your reminders.
-3. Add the repository secrets (Settings → Secrets and variables → Actions):
-   `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM`, `MY_PHONE`.
-4. In `.github/workflows/reminder-calls.yml`, set `TZ` to your time zone.
-5. Go to Actions → **Reminder calls** → **Run workflow** to get a test call right away. Press any key when it asks.
-6. Set up the on-time trigger below.
+Your schedule shows where you will be and when, so keep it private. **Don't use GitHub's Fork button**, because a fork of a public repo can't be made private.
 
-### On-time trigger (cron-job.org)
+Create an empty **private** repository at [github.com/new](https://github.com/new), without a README. Then run these commands, using your own username and repository name:
+
+```bash
+git clone https://github.com/ezekiel3x/daycaller.git my-daycaller
+cd my-daycaller
+git remote set-url origin https://github.com/YOUR-USERNAME/YOUR-REPO.git
+git push -u origin main
+```
+
+### 2. Add your reminders
+
+Remove the examples and add your own. Times use the 24-hour clock in the time zone you set in step 3.
+
+```bash
+python daycaller.py remove 1 2 3
+python daycaller.py add 06:30 "Your first class is at 8:30 in Room 101." --days mon,wed,fri
+python daycaller.py add 07:00 "Your first class is at 9 in Hall B." --days tue,thu
+python daycaller.py list
+```
+
+This updates `schedule.json`, which looks like this:
+
+```json
+{
+  "next_id": 5,
+  "reminders": [
+    {
+      "id": 4,
+      "time": "06:30",
+      "message": "Your first class is at 8:30 in Room 101.",
+      "days": ["mon", "wed", "fri"]
+    }
+  ]
+}
+```
+
+### 3. Set your time zone
+
+In `.github/workflows/reminder-calls.yml`, change `TZ` to your [time zone name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones), for example `Africa/Dar_es_Salaam` or `Europe/London`. Then upload your changes:
+
+```bash
+git add schedule.json .github/workflows/reminder-calls.yml
+git commit -m "Add my schedule"
+git push
+```
+
+Run those three commands again whenever you change your reminders.
+
+### 4. Add your Twilio secrets
+
+In your repository, open **Settings → Secrets and variables → Actions → New repository secret** and add:
+
+| Name | Value |
+|---|---|
+| `TWILIO_ACCOUNT_SID` | Your Account SID |
+| `TWILIO_AUTH_TOKEN` | Your Auth Token |
+| `TWILIO_FROM` | Your Twilio number |
+| `MY_PHONE` | Your mobile number |
+
+Never put these values in a file you commit.
+
+### 5. Test a call
+
+Open the **Actions** tab. If GitHub asks, enable workflows. Choose **Reminder calls → Run workflow**, then press any key on your phone when the call asks.
+
+### 6. Set up the on-time trigger
 
 GitHub's built-in `schedule:` can start hours late, so a free external scheduler starts the workflow instead.
 
@@ -88,6 +216,24 @@ The job only wakes the workflow. The workflow reads `schedule.json` to decide wh
 Twilio reports a call as `completed` whenever anything answers, including a carrier announcement or voicemail. So each call asks you to press a key. The first cloud call deploys a small `/confirm` function to your own Twilio Serverless service, and DayCaller uses it to tell whether you really heard the reminder.
 
 > Each callback is a separate billed call. Check Twilio's rates for your country.
+
+## Troubleshooting
+
+| Problem | What to do |
+|---|---|
+| `python` is not recognized | Open a new terminal. If it still fails, reinstall Python with **Add python.exe to PATH** ticked, or try `py` instead of `python`. |
+| The PC doesn't ring | Keep the `python daycaller.py run` window open and stop the PC from sleeping. |
+| Twilio says the number is unverified | Add your mobile under **Verified Caller IDs**, or upgrade the account. |
+| Twilio says calling that country isn't allowed | Enable the country under **Voice → Settings → Geo Permissions**. |
+| cron-job.org test shows `401` | The token was rejected. Use **HTTP authentication** with your GitHub username and token, and remove any `Authorization` header. |
+| cron-job.org test shows `403` or `404` | Check the URL. Give the token access to this repository with **Contents: Read and write**. |
+| Opening the dispatch URL in a browser shows `404` | This is normal. The URL only works as a `POST` with your token, so test it from cron-job.org. |
+| The Actions run says `No reminders due` | Check `TZ`, the day and the time in `schedule.json`. The job must start within 90 minutes before the reminder. |
+| No run appears in **Actions** | Enable workflows in the Actions tab, and make sure the workflow file is on your default branch. |
+| Twilio says `completed`, but your phone never rang | A carrier or voicemail probably answered. Check Do Not Disturb, blocked and spam calls, and call forwarding. Save your Twilio number as a contact. |
+| You keep getting called back | Press a key **after** you hear "Press any key to confirm". |
+
+To see what happened to a call, open **Actions**, choose the latest run, and read the lines that start with `Attempt`. The Twilio Console also lists every call under **Monitor → Logs → Calls**.
 
 ## Settings (`config.json`)
 
